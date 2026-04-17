@@ -1,16 +1,32 @@
 #!/bin/bash
 set -e
 
-# --- 1. LOAD SECRETS FROM USB (if present) ---
+# --- 0. LOAD SECRETS FROM USB ---
 [ -f "/boot/secrets.txt" ] && source /boot/secrets.txt
 
-# --- 2. SYSTEM SECURITY & WAKE-ON-LAN ---
+# --- 1. SYSTEM SECURITY & WAKE-ON-LAN ---
 echo "root:${DIETPI_PASSWORD:-dietpi}" | chpasswd
-apt-get update && apt-get install -y ethtool openvpn sqlite3 uuid-runtime
+apt-get update && apt-get install -y ethtool openvpn sqlite3
 
 # Configure WoL persistently
 printf 'auto eth0\niface eth0 inet dhcp\n    ethernet-wol g\n' > /etc/network/interfaces.d/eth0
 ethtool -s eth0 wol g
+
+# --- 2. AUTO-DETECT & MOUNT 3TB MEDIA DRIVE ---
+# Finds drive larger than 2TB (your Seagate), gets UUID, mounts via fstab
+MEDIA_DEV=$(lsblk -bndo NAME,SIZE 2>/dev/null | awk '$2 > 2000000000000 {print "/dev/"$1; exit}')
+if [ -n "$MEDIA_DEV" ]; then
+  MEDIA_PART="${MEDIA_DEV}1"
+  if blkid "$MEDIA_PART" >/dev/null 2>&1; then
+    MEDIA_UUID=$(blkid -s UUID -o value "$MEDIA_PART" 2>/dev/null || true)
+    if [ -n "$MEDIA_UUID" ]; then
+      mkdir -p /mnt/media
+      grep -q "^UUID=$MEDIA_UUID" /etc/fstab || echo "UUID=$MEDIA_UUID /mnt/media ext4 defaults,noatime 0 2" >> /etc/fstab
+      mount -a 2>/dev/null || mount "$MEDIA_PART" /mnt/media 2>/dev/null || true
+      echo "✅ Mounted 3TB drive: $MEDIA_UUID"
+    fi
+  fi
+fi
 
 # --- 3. EXPRESSVPN OPENVPN SETUP ---
 mkdir -p /etc/openvpn
@@ -59,25 +75,13 @@ pm2 start /home/dietpi/AIOMetadata/index.js --name "aiometadata"
 pm2 save
 pm2 startup
 
-# --- 9. MOUNT STORAGE (UUID-based for reliability) ---
-mkdir -p /mnt/media
-# Replace YOUR-3TB-UUID with output from: blkid /dev/sdb1 | cut -d' ' -f2 | tr -d '"'
-# Example: UUID="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-if [ -n "${MEDIA_UUID:-}" ]; then
-  echo "UUID=${MEDIA_UUID} /mnt/media ext4 defaults,noatime 0 2" >> /etc/fstab
-  mount -a 2>/dev/null || mount /dev/sdb1 /mnt/media 2>/dev/null || true
-else
-  mount /dev/sdb1 /mnt/media 2>/dev/null || true
-fi
-
-# --- 10. CONFIGURE SAMBA ---
+# --- 9. CONFIGURE SAMBA ---
 (echo "${SAMBA_PASSWORD:-dietpi}"; echo "${SAMBA_PASSWORD:-dietpi}") | smbpasswd -s -a root 2>/dev/null || true
 
-# --- 11. FINAL STATUS ---
+# --- 10. FINAL STATUS ---
 echo "✅ NAS setup complete!"
 echo "🌐 Jellyfin: http://$(hostname -I | awk '{print $1}'):8096"
 echo "📺 Sonarr:  http://$(hostname -I | awk '{print $1}'):8989"
 echo "🎬 Radarr:  http://$(hostname -I | awk '{print $1}'):7878"
 echo "🔍 Prowlarr: http://$(hostname -I | awk '{print $1}'):9696"
 echo "🔑 Torbox API key ready: ${TORBOX_API_KEY:-[NOT SET]}"
-echo "💡 Run 'blkid /dev/sdb1' to get your 3TB UUID for persistent mounting"
